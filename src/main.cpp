@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <UrlEncode.h>
 #include <MPU6050.h>
 #include <Wire.h>
 #include <I2Cdev.h>
