@@ -47,12 +47,12 @@ void loop()
 #include <WiFiClient.h>
 #include <UrlEncode.h>
 
-const char* ssid = "Mariano";
-const char* password = "hola1234";
+const char* ssid = "Oms";
+const char* password = "carranza1960";
 
 // +international_country_code + phone number
 // Portugal +351, example: +351912345678
-String phoneNumber = "+541169350147";
+String phoneNumber = "5491169350147";
 String apiKey = "9384670";
 
 void sendMessage(String message){
@@ -83,7 +83,7 @@ void sendMessage(String message){
 
 void setup() {
   Serial.begin(115200);
-  
+
   WiFi.begin(ssid, password);
   Serial.println("Connecting");
   while(WiFi.status() != WL_CONNECTED) {
@@ -94,10 +94,10 @@ void setup() {
   Serial.print("Connected to WiFi network with IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // Send Message to WhatsAPP
-  sendMessage("N");
 }
 
 void loop() {
-  
+  // Send Message to WhatsAPP
+  sendMessage("Hello from ESP8266!");
+  delay(5000);
 }
