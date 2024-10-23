@@ -78,7 +78,7 @@ void setup() {
 
 void loop() {
 
-  
+  DynamicJsonBuffer jsonBuffer;
 
   // WiFi.scanNetworks will return the number of networks found
   int n = WiFi.scanNetworks();
