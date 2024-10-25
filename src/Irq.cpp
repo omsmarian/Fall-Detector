@@ -1,314 +1,299 @@
-// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
-// is used in I2Cdev.h
-#include "Wire.h"
-
 // I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
 // for both classes must be in the include path of your project
 #include "I2Cdev.h"
-#include "MPU6050.h"
+
+#include "MPU6050_6Axis_MotionApps20.h"
+//#include "MPU6050.h" // not necessary if using MotionApps include file
+
+// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
+// is used in I2Cdev.h
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+    #include "Wire.h"
+#endif
 
 // class default I2C address is 0x68
 // specific I2C addresses may be passed as a parameter here
-// AD0 low = 0x68 (default for InvenSense evaluation board)
+// AD0 low = 0x68 (default for SparkFun breakout and InvenSense evaluation board)
 // AD0 high = 0x69
-MPU6050 accelgyro;
+MPU6050 mpu;
+//MPU6050 mpu(0x69); // <-- use for AD0 high
 
-int16_t ax, ay, az;
-int16_t gx, gy, gz;
-int8_t threshold, count; 
-float temp;
-bool zero_detect; 
-bool TurnOnZI = false;
+/* =========================================================================
+   NOTE: In addition to connection 3.3v, GND, SDA, and SCL, this sketch
+   depends on the MPU-6050's INT pin being connected to the Arduino's
+   external interrupt #0 pin. On the Arduino Uno and Mega 2560, this is
+   digital I/O pin 2.
+ * ========================================================================= */
 
-bool XnegMD, XposMD, YnegMD, YposMD, ZnegMD, ZposMD;
+/* =========================================================================
+   NOTE: Arduino v1.0.1 with the Leonardo board generates a compile error
+   when using Serial.write(buf, len). The Teapot output uses this method.
+   The solution requires a modification to the Arduino USBAPI.h file, which
+   is fortunately simple, but annoying. This will be fixed in the next IDE
+   release. For more info, see these links:
 
+   http://arduino.cc/forum/index.php/topic,109987.0.html
+   http://code.google.com/p/arduino/issues/detail?id=958
+ * ========================================================================= */
+
+
+
+// uncomment "OUTPUT_READABLE_QUATERNION" if you want to see the actual
+// quaternion components in a [w, x, y, z] format (not best for parsing
+// on a remote host such as Processing or something though)
+//#define OUTPUT_READABLE_QUATERNION
+
+// uncomment "OUTPUT_READABLE_EULER" if you want to see Euler angles
+// (in degrees) calculated from the quaternions coming from the FIFO.
+// Note that Euler angles suffer from gimbal lock (for more info, see
+// http://en.wikipedia.org/wiki/Gimbal_lock)
+//#define OUTPUT_READABLE_EULER
+
+// uncomment "OUTPUT_READABLE_YAWPITCHROLL" if you want to see the yaw/
+// pitch/roll angles (in degrees) calculated from the quaternions coming
+// from the FIFO. Note this also requires gravity vector calculations.
+// Also note that yaw/pitch/roll angles suffer from gimbal lock (for
+// more info, see: http://en.wikipedia.org/wiki/Gimbal_lock)
+#define OUTPUT_READABLE_YAWPITCHROLL
+
+// uncomment "OUTPUT_READABLE_REALACCEL" if you want to see acceleration
+// components with gravity removed. This acceleration reference frame is
+// not compensated for orientation, so +X is always +X according to the
+// sensor, just without the effects of gravity. If you want acceleration
+// compensated for orientation, us OUTPUT_READABLE_WORLDACCEL instead.
+//#define OUTPUT_READABLE_REALACCEL
+
+// uncomment "OUTPUT_READABLE_WORLDACCEL" if you want to see acceleration
+// components with gravity removed and adjusted for the world frame of
+// reference (yaw is relative to initial orientation, since no magnetometer
+// is present in this case). Could be quite handy in some cases.
+//#define OUTPUT_READABLE_WORLDACCEL
+
+// uncomment "OUTPUT_TEAPOT" if you want output that matches the
+// format used for the InvenSense teapot demo
+//#define OUTPUT_TEAPOT
+
+
+
+#define INTERRUPT_PIN 14  // use pin 2 on Arduino Uno & most boards
+#define LED_PIN 2 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
 bool blinkState = false;
+
+// MPU control/status vars
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
+// orientation/motion vars
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorInt16 aa;         // [x, y, z]            accel sensor measurements
+VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
+VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float euler[3];         // [psi, theta, phi]    Euler angle container
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+
+// packet structure for InvenSense teapot demo
+uint8_t teapotPacket[14] = { '$', 0x02, 0,0, 0,0, 0,0, 0,0, 0x00, 0x00, '\r', '\n' };
+
+
+
+// ================================================================
+// ===               INTERRUPT DETECTION ROUTINE                ===
+// ================================================================
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+ICACHE_RAM_ATTR void dmpDataReady() {
+    mpuInterrupt = true;
+}
+
+
+
+// ================================================================
+// ===                      INITIAL SETUP                       ===
+// ================================================================
 
 void setup() {
     // join I2C bus (I2Cdev library doesn't do this automatically)
-    Wire.begin();
+    #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+        Wire.begin();
+        Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
+    #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+        Fastwire::setup(400, true);
+    #endif
 
     // initialize serial communication
-    // (38400 chosen because it works as well at 8MHz as it does at 16MHz, but
-    // it's really up to you depending on your project)
+    // (115200 chosen because it is required for Teapot Demo output, but it's
+    // really up to you depending on your project)
     Serial.begin(115200);
+    while (!Serial); // wait for Leonardo enumeration, others continue immediately
+
+    // NOTE: 8MHz or slower host processors, like the Teensy @ 3.3V or Arduino
+    // Pro Mini running at 3.3V, cannot handle this baud rate reliably due to
+    // the baud timing being too misaligned with processor ticks. You must use
+    // 38400 or slower in these cases, or use some kind of external separate
+    // crystal solution for the UART timer.
 
     // initialize device
-    //Serial.println("Initializing I2C devices...");
-    accelgyro.initialize();
-	
+    Serial.println(F("Initializing I2C devices..."));
+    mpu.initialize();
+    pinMode(INTERRUPT_PIN, INPUT);
+
     // verify connection
-    //Serial.println("Testing device connections...");
-    //Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
+    // wait for ready
+    Serial.println(F("\nSend any character to begin DMP programming and demo: "));
+    while (Serial.available() && Serial.read()); // empty buffer
+    while (!Serial.available());                 // wait for data
+    while (Serial.available() && Serial.read()); // empty buffer again
 
-    //Set up zero motion
-	
-    /** Get accelerometer power-on delay.
-    * The accelerometer data path provides samples to the sensor registers, Motion
-    * detection, Zero Motion detection, and Free Fall detection modules. The
-    * signal path contains filters which must be flushed on wake-up with new
-    * samples before the detection modules begin operations. The default wake-up
-    * delay, of 4ms can be lengthened by up to 3ms. This additional delay is
-    * specified in ACCEL_ON_DELAY in units of 1 LSB = 1 ms. The user may select
-    * any value above zero unless instructed otherwise by InvenSense. Please refer
-    * to Section 8 of the MPU-6000/MPU-6050 Product Specification document for
-    * further information regarding the detection modules.
-    * @return Current accelerometer power-on delay
-    * @see MPU60X0_RA_MOT_DETECT_CTRL
-    * @see MPU60X0_DETECT_ACCEL_ON_DELAY_BIT
-    */	
-    accelgyro.setAccelerometerPowerOnDelay(3);
-	
+    // load and configure the DMP
+    Serial.println(F("Initializing DMP..."));
+    devStatus = mpu.dmpInitialize();
 
-    /** Get Zero Motion Detection interrupt enabled status.
-    * Will be set 0 for disabled, 1 for enabled.
-    * @return Current interrupt enabled status
-    * @see MPU60X0_RA_INT_ENABLE
-    * @see MPU60X0_INTERRUPT_ZMOT_BIT
-    **/	
-    accelgyro.setIntZeroMotionEnabled(TurnOnZI);
-	
+    // supply your own gyro offsets here, scaled for min sensitivity
+    mpu.setXGyroOffset(20);
+    mpu.setYGyroOffset(-13);
+    mpu.setZGyroOffset(37);
+    mpu.setZAccelOffset(2372); // 1688 factory default for my test chip
 
-    /** Get the high-pass filter configuration.
-    * The DHPF is a filter module in the path leading to motion detectors (Free
-    * Fall, Motion threshold, and Zero Motion). The high pass filter output is not
-    * available to the data registers (see Figure in Section 8 of the MPU-6000/
-    * MPU-6050 Product Specification document).
-    * 
-    * The high pass filter has three modes:
-    *    Reset: The filter output settles to zero within one sample. This
-    *           effectively disables the high pass filter. This mode may be toggled
-    *           to quickly settle the filter.
-    *
-    *    On:    The high pass filter will pass signals above the cut off frequency.
-    *
-    *    Hold:  When triggered, the filter holds the present sample. The filter
-    *           output will be the difference between the input sample and the held
-    *           sample.
-    *
-    * ACCEL_HPF | Filter Mode | Cut-off Frequency
-    * ----------+-------------+------------------
-    * 0         | Reset       | None
-    * 1         | On          | 5Hz
-    * 2         | On          | 2.5Hz
-    * 3         | On          | 1.25Hz
-    * 4         | On          | 0.63Hz
-    * 7         | Hold        | None
-    * </pre>
-    * 
-    * @return Current high-pass filter configuration
-    * @see MPU60X0_DHPF_RESET
-    * @see MPU60X0_RA_ACCEL_CONFIG
-    */	
-    //DEBUG_PRINTLN("Setting DHPF bandwidth to 5Hz...");
-    accelgyro.setDHPFMode(1);
+    // make sure it worked (returns 0 if so)
+    if (devStatus == 0) {
+        // Calibration Time: generate offsets and calibrate our MPU6050
+        mpu.CalibrateAccel(6);
+        mpu.CalibrateGyro(6);
+        mpu.PrintActiveOffsets();
+        // turn on the DMP, now that it's ready
+        Serial.println(F("Enabling DMP..."));
+        mpu.setDMPEnabled(true);
 
-	
-    /** Get motion detection event acceleration threshold.
-    * This register configures the detection threshold for Motion interrupt
-    * generation. The unit of MOT_THR is 1LSB = 2mg. Motion is detected when the
-    * absolute value of any of the accelerometer measurements exceeds this Motion
-    * detection threshold. This condition increments the Motion detection duration
-    * counter (Register 32). The Motion detection interrupt is triggered when the
-    * Motion Detection counter reaches the time count specified in MOT_DUR
-    * (Register 32).
-    * 
-    * The Motion interrupt will indicate the axis and polarity of detected motion
-    * in MOT_DETECT_STATUS (Register 97).
-    * 
-    * For more details on the Motion detection interrupt, see Section 8.3 of the
-    * MPU-6000/MPU-6050 Product Specification document as well as Registers 56 and
-    * 58 of this document.
-    *
-    * @return Current motion detection acceleration threshold value (LSB = 2mg)
-    * @see MPU60X0_RA_MOT_THR
-    */	
-    //Serial.println("Setting motion detection threshold to 2...");
-    accelgyro.setMotionDetectionThreshold(2);
+        // enable Arduino interrupt detection
+        Serial.print(F("Enabling interrupt detection (Arduino external interrupt "));
+        Serial.print(digitalPinToInterrupt(INTERRUPT_PIN));
+        Serial.println(F(")..."));
+        attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
 
+        // set our DMP Ready flag so the main loop() function knows it's okay to use it
+        Serial.println(F("DMP ready! Waiting for first interrupt..."));
+        dmpReady = true;
 
-    /** Get zero motion detection event acceleration threshold.
-    * This register configures the detection threshold for Zero Motion interrupt
-    * generation. The unit of ZRMOT_THR is 1LSB = 2mg. Zero Motion is detected when
-    * the absolute value of the accelerometer measurements for the 3 axes are each
-    * less than the detection threshold. This condition increments the Zero Motion
-    * duration counter (Register 34). The Zero Motion interrupt is triggered when
-    * the Zero Motion duration counter reaches the time count specified in
-    * ZRMOT_DUR (Register 34).
-    * 
-    * Unlike Free Fall or Motion detection, Zero Motion detection triggers an
-    * interrupt both when Zero Motion is first detected and when Zero Motion is no
-    * longer detected.
-    * 
-    * When a zero motion event is detected, a Zero Motion Status will be indicated
-    * in the MOT_DETECT_STATUS register (Register 97). When a motion-to-zero-motion
-    * condition is detected, the status bit is set to 1. When a zero-motion-to-
-    * motion condition is detected, the status bit is set to 0.
-    * 
-    * For more details on the Zero Motion detection interrupt, see Section 8.4 of
-    * the MPU-6000/MPU-6050 Product Specification document as well as Registers 56
-    * and 58 of this document.
-    * 
-    * @return Current zero motion detection acceleration threshold value (LSB = 2mg)
-    * @see MPU60X0_RA_ZRMOT_THR
-    */	
-    //Serial.println("Setting zero-motion detection threshold to 156...");
-    accelgyro.setZeroMotionDetectionThreshold(2);
+        // get expected DMP packet size for later comparison
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    } else {
+        // ERROR!
+        // 1 = initial memory load failed
+        // 2 = DMP configuration updates failed
+        // (if it's going to break, usually the code will be 1)
+        Serial.print(F("DMP Initialization failed (code "));
+        Serial.print(devStatus);
+        Serial.println(F(")"));
+    }
 
-
-    /** Get motion detection event duration threshold.
-    * This register configures the duration counter threshold for Motion interrupt
-    * generation. The duration counter ticks at 1 kHz, therefore MOT_DUR has a unit
-    * of 1LSB = 1ms. The Motion detection duration counter increments when the
-    * absolute value of any of the accelerometer measurements exceeds the Motion
-    * detection threshold (Register 31). The Motion detection interrupt is
-    * triggered when the Motion detection counter reaches the time count specified
-    * in this register.
-    * 
-    * For more details on the Motion detection interrupt, see Section 8.3 of the
-    * MPU-6000/MPU-6050 Product Specification document.
-    * 
-    * @return Current motion detection duration threshold value (LSB = 1ms)
-    * @see MPU60X0_RA_MOT_DUR
-    */
-    //Serial.println("Setting motion detection duration to 80...");
-    accelgyro.setMotionDetectionDuration(40);
-
-
-    /** Get zero motion detection event duration threshold.
-    * This register configures the duration counter threshold for Zero Motion
-    * interrupt generation. The duration counter ticks at 16 Hz, therefore
-    * ZRMOT_DUR has a unit of 1 LSB = 64 ms. The Zero Motion duration counter
-    * increments while the absolute value of the accelerometer measurements are
-    * each less than the detection threshold (Register 33). The Zero Motion
-    * interrupt is triggered when the Zero Motion duration counter reaches the time
-    * count specified in this register.
-    * 
-    * For more details on the Zero Motion detection interrupt, see Section 8.4 of
-    * the MPU-6000/MPU-6050 Product Specification document, as well as Registers 56
-    * and 58 of this document.
-    * 
-    * @return Current zero motion detection duration threshold value (LSB = 64ms)
-    * @see MPU60X0_RA_ZRMOT_DUR
-    */	
-    //Serial.println("Setting zero-motion detection duration to 0...");
-    accelgyro.setZeroMotionDetectionDuration(1);	
-	
-
-    // configure Arduino LED for
-    pinMode(LED_BUILTIN, OUTPUT);
+    // configure LED for output
+    pinMode(LED_PIN, OUTPUT);
 }
+
+
+
+// ================================================================
+// ===                    MAIN PROGRAM LOOP                     ===
+// ================================================================
 
 void loop() {
-    // read raw accel/gyro measurements from device
-    //Serial.println("Getting raw accwl/gyro measurements");
-    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    
-    //Serial.println("Getting Motion indicators, count and threshold");
-	
-    XnegMD = accelgyro.getXNegMotionDetected();
-    XposMD = accelgyro.getXPosMotionDetected();
-    YnegMD = accelgyro.getYNegMotionDetected();
-    YposMD = accelgyro.getYPosMotionDetected();
-    ZnegMD = accelgyro.getZNegMotionDetected();
-    ZposMD = accelgyro.getZPosMotionDetected();
-	
-    zero_detect = accelgyro.getIntMotionStatus();
-    threshold = accelgyro.getZeroMotionDetectionThreshold();
-    
-    //Serial.println("Got to count");
-    //count = accelgyro.getMotionDetectionCounterDecrement(); 
-	
-    /** Get current internal temperature.
-    * @return Temperature reading in 16-bit 2's complement format
-    * @see MPU60X0_RA_TEMP_OUT_H
-    */
-    //Serial.println("Getting Die Temperature");	
-    temp=(accelgyro.getTemperature()/340.)+36.53;
+    // if programming failed, don't try to do anything
+    if (!dmpReady) return;
+    // read a packet from FIFO
+    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet 
+        #ifdef OUTPUT_READABLE_QUATERNION
+            // display quaternion values in easy matrix form: w x y z
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            Serial.print("quat\t");
+            Serial.print(q.w);
+            Serial.print("\t");
+            Serial.print(q.x);
+            Serial.print("\t");
+            Serial.print(q.y);
+            Serial.print("\t");
+            Serial.println(q.z);
+        #endif
 
+        #ifdef OUTPUT_READABLE_EULER
+            // display Euler angles in degrees
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetEuler(euler, &q);
+            Serial.print("euler\t");
+            Serial.print(euler[0] * 180/M_PI);
+            Serial.print("\t");
+            Serial.print(euler[1] * 180/M_PI);
+            Serial.print("\t");
+            Serial.println(euler[2] * 180/M_PI);
+        #endif
 
-    /*  The accelerometer and gyroscope measurements are explained in the MPU-6050 
-    * datasheet in the GYRO_CONFIG and ACCEL_CONFIG register descriptions (sections 4.4 
-    * and 4.5 on pages 14 and 15). The scale of each depends on the sensitivity settings 
-    * chosen, which can be one of +/- 2, 4, 8, or 16g for the accelerometer and one of 
-    * +/- 250, 500, 1000, or 2000 deg/sec for the gyroscope. The accelerometer produces data 
-    * in units of acceleration (distance over time2), and the gyroscope produces data in units
-    * of rotational velocity (rotation distance over time).
-    * 
-    * The output scale for any setting is [-32768, +32767] for each of the six axes. The default 
-    * setting in the I2Cdevlib class is +/- 2g for the accel and +/- 250 deg/sec for the gyro. If 
-    * the device is perfectly level and not moving, then:
-    * 		X/Y accel axes should read 0
-    * 		Z accel axis should read 1g, which is +16384 at a sensitivity of 2g
-    * 		X/Y/Z gyro axes should read 0
-    * 
-    * In reality, the accel axes won't read exactly 0 since it is difficult to be perfectly level 
-    * and there is some noise/error, and the gyros will also not read exactly 0 for the same reason
-    * (noise/error).
-    */
-	
-    // these methods (and a few others) are also available
-    //accelgyro.getAcceleration(&ax, &ay, &az);
-    //accelgyro.getRotation(&gx, &gy, &gz);
-    
-    //Serial.print(temp);Serial.print(",");
-    Serial.print(ax/16384.); Serial.print(",");
-    Serial.print(ay/16384.); Serial.print(",");
-    Serial.print(az/16384.); Serial.print(",");
-    Serial.print(gx/131.072); Serial.print(",");
-    Serial.print(gy/131.072); Serial.print(",");
-    Serial.print(gz/131.072); Serial.print(",");
-    
-    Serial.println(zero_detect); Serial.print(",");
-	//Serial.print(XnegMD); Serial.print(",");
-	//Serial.println(XposMD);
-	
-    // display tab-separated accel/gyro x/y/z values
-    /*
-    Serial.print("a/g:\t");
-    Serial.print(ax/16384.); Serial.print("\t");
-    Serial.print(ay/16384.); Serial.print("\t");
-    Serial.print(az/16384.); Serial.print("\t");
-    Serial.print(gx/131.072); Serial.print("\t");
-    Serial.print(gy/131.072); Serial.print("\t");
-    Serial.println(gz/131.072);
-	
-    Serial.print("DieTemp:\t");Serial.println(temp);
-	
-    Serial.print("ZeroMotion(97):\t");	
-    Serial.print(zero_detect); Serial.print("\t");
-    Serial.print("Count: \t");Serial.print(count); Serial.print("\t");
-    Serial.print(XnegMD); Serial.print("\t");
-    Serial.print(XposMD); Serial.print("\t");
-    Serial.print(YnegMD); Serial.print("\t");
-    Serial.print(YposMD); Serial.print("\t");
-    Serial.print(ZnegMD); Serial.print("\t");
-    Serial.println(ZposMD);
-    */	
+        #ifdef OUTPUT_READABLE_YAWPITCHROLL
+            // display Euler angles in degrees
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+            Serial.print("ypr\t");
+            Serial.print(ypr[0] * 180/M_PI);
+            Serial.print("\t");
+            Serial.print(ypr[1] * 180/M_PI);
+            Serial.print("\t");
+            Serial.println(ypr[2] * 180/M_PI);
+        #endif
 
-	
-    delay(80);
-	
-    // blink LED to indicate activity
-    blinkState = !blinkState;
-    digitalWrite(LED_BUILTIN, blinkState);
+        #ifdef OUTPUT_READABLE_REALACCEL
+            // display real acceleration, adjusted to remove gravity
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetAccel(&aa, fifoBuffer);
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+            Serial.print("areal\t");
+            Serial.print(aaReal.x);
+            Serial.print("\t");
+            Serial.print(aaReal.y);
+            Serial.print("\t");
+            Serial.println(aaReal.z);
+        #endif
+
+        #ifdef OUTPUT_READABLE_WORLDACCEL
+            // display initial world-frame acceleration, adjusted to remove gravity
+            // and rotated based on known orientation from quaternion
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetAccel(&aa, fifoBuffer);
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+            mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
+            Serial.print("aworld\t");
+            Serial.print(aaWorld.x);
+            Serial.print("\t");
+            Serial.print(aaWorld.y);
+            Serial.print("\t");
+            Serial.println(aaWorld.z);
+        #endif
+    
+        #ifdef OUTPUT_TEAPOT
+            // display quaternion values in InvenSense Teapot demo format:
+            teapotPacket[2] = fifoBuffer[0];
+            teapotPacket[3] = fifoBuffer[1];
+            teapotPacket[4] = fifoBuffer[4];
+            teapotPacket[5] = fifoBuffer[5];
+            teapotPacket[6] = fifoBuffer[8];
+            teapotPacket[7] = fifoBuffer[9];
+            teapotPacket[8] = fifoBuffer[12];
+            teapotPacket[9] = fifoBuffer[13];
+            Serial.write(teapotPacket, 14);
+            teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
+        #endif
+
+        // blink LED to indicate activity
+        blinkState = !blinkState;
+        digitalWrite(LED_PIN, blinkState);
+    }
 }
-
-
-
-/*
-
-PARA LO QUE QUIERO HACER DEBERIA TENER UNA ESTRUCTURA COMO:
-
-void setup() {
-  Serial.begin(115200);
-  
-  mpu.initialize();
-
-
-  Serial.println("I'm alive");
-
-  ESP.deepSleep(20e6);
-}
-*/
