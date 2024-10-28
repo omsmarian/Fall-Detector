@@ -10,8 +10,8 @@
 
 #define FALL_THRESHOLD 0.7
 
-const char* ssid = "TCL 408";
-const char* password = "apik6Vis";
+const char* ssid = "Oms";
+const char* password = "Carranza1960";
 
 bool flag;
 

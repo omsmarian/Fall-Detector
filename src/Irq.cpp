@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <ESP8266WiFi.h>
 
  //Analog port 4 (A4) = SDA (serial data)
 //Analog port 5 (A5) = SCL (serial clock)
@@ -19,6 +20,8 @@
 #else
 #define MPU6050_ADDRESS 0x68 // Device address when ADO = 0
 #endif
+
+#define LIGHT_WAKE_PIN D5
 
 int wakePin = 2; // pin used for waking up  
 int flag = 0;
@@ -107,4 +110,14 @@ void loop() {
     count = 0;
   }
   count++;
+
+
+   //wifi_station_disconnect(); //not needed
+      gpio_pin_wakeup_enable(GPIO_ID_PIN(LIGHT_WAKE_PIN), GPIO_PIN_INTR_LOLEVEL);
+      wifi_set_opmode(NULL_MODE);
+      wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+      wifi_fpm_open();
+      wifi_fpm_set_wakeup_cb(callback);
+      wifi_fpm_do_sleep(FPM_SLEEP_MAX_TIME);
+      delay(1000);
 }
