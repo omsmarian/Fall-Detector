@@ -21,7 +21,8 @@
 #define MPU6050_ADDRESS 0x68 // Device address when ADO = 0
 #endif
 
-#define LIGHT_WAKE_PIN D5
+#define LIGHT_WAKE_PIN  D5
+#define FPM_SLEEP_MAX_TIME  0xFFFFFFF
 
 int wakePin = 2; // pin used for waking up  
 int flag = 0;
@@ -56,6 +57,11 @@ uint8_t readByte(uint8_t address, uint8_t subAddress) {
   return data; // Return data read from slave register
 }
 
+void callback() {
+  Serial1.println("Siesta");
+}
+ 
+
 void setup() {
   
   /*
@@ -81,16 +87,27 @@ void setup() {
 
   pinMode(2, INPUT);                                    // sets the digital pin 7 as input
 
-  pinMode(D5, INPUT_PULLUP);                            // wakePin is pin no. 2
-  attachInterrupt(digitalPinToInterrupt(D5), miua, FALLING);
+  // pinMode(D5, INPUT_PULLUP);                            // wakePin is pin no. 2
+  // attachInterrupt(digitalPinToInterrupt(D5), miua, FALLING);
   pinMode(LED_BUILTIN, OUTPUT);                         //   led is pin no. 13
   digitalWrite(LED_BUILTIN, LOW);                       // turn onn LED
-  
+
 }
 
 uint8_t count;
 uint16_t readdata;
 void loop() {
+
+  Serial.println("Going to sleep");
+  gpio_pin_wakeup_enable(GPIO_ID_PIN(LIGHT_WAKE_PIN), GPIO_PIN_INTR_LOLEVEL);
+  wifi_set_opmode(NULL_MODE);
+  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+  wifi_fpm_open();
+  wifi_fpm_set_wakeup_cb(callback);
+  wifi_fpm_do_sleep(FPM_SLEEP_MAX_TIME);
+  delay(1000);
+  Serial.println("Woke up");
+
   if (flag) 
   {
     digitalWrite(LED_BUILTIN, HIGH);
@@ -113,11 +130,4 @@ void loop() {
 
 
    //wifi_station_disconnect(); //not needed
-      gpio_pin_wakeup_enable(GPIO_ID_PIN(LIGHT_WAKE_PIN), GPIO_PIN_INTR_LOLEVEL);
-      wifi_set_opmode(NULL_MODE);
-      wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
-      wifi_fpm_open();
-      wifi_fpm_set_wakeup_cb(callback);
-      wifi_fpm_do_sleep(FPM_SLEEP_MAX_TIME);
-      delay(1000);
 }
