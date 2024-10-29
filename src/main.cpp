@@ -1,220 +1,182 @@
-// Arduino sketch that returns calibration offsets for MPU6050 //   Version 1.1  (31th January 2014)
-// Done by Luis Ródenas <luisrodenaslorda@gmail.com>
-// Based on the I2Cdev library and previous work by Jeff Rowberg <jeff@rowberg.net>
-// Updates (of the library) should (hopefully) always be available at https://github.com/jrowberg/i2cdevlib
+#include <Arduino.h>
+#include <Wire.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <UrlEncode.h>
 
-// These offsets were meant to calibrate MPU6050's internal DMP, but can be also useful for reading sensors. 
-// The effect of temperature has not been taken into account so I can't promise that it will work if you 
-// calibrate indoors and then use it outdoors. Best is to calibrate and use at the same room temperature.
+//Analog port 4 (A4) = SDA (serial data)
+//Analog port 5 (A5) = SCL (serial clock)
+#define SIGNAL_PATH_RESET 0x68
+#define I2C_SLV0_ADDR     0x37
+#define ACCEL_CONFIG      0x1C
+#define FF_THR            0x1D             // Motion detection threshold bits [7:0]
+#define FF_DUR            0x1E             // Duration counter threshold for motion interrupt generation, 1 kHz rate, LSB = 1 ms
+#define MOT_DETECT_CTRL   0x69
+#define INT_ENABLE        0x38
+#define WHO_AM_I_MPU6050  0x75   // Should return 0x68
+#define INT_STATUS        0x3A
 
-/* ==========  LICENSE  ==================================
- I2Cdev device library code is placed under the MIT license
- Copyright (c) 2011 Jeff Rowberg
+//when nothing connected to AD0 than address is 0x68
+#define ADO               0
+#if ADO
+#define MPU6050_ADDRESS   0x69    // Device address when ADO = 1
+#else
+#define MPU6050_ADDRESS   0x68    // Device address when ADO = 0
+#endif
+
+#define LIGHT_WAKE_PIN    D5
+#define FPM_SLEEP_MAX_TIME  0xFFFFFFF
+
+
+bool flag = 0;
+
+const char* ssid = "Oms";
+const char* password = "carranza1960";
+
+String phoneNumber = "+5491169350147";
+String apiKey = "9384670";
+
+
+void sendMessage(String message);
+void writeByte(uint8_t address, uint8_t subAddress, uint8_t data);
+uint8_t readByte(uint8_t address, uint8_t subAddress);
+void callback();
+
+
  
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
- 
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
- 
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
- =========================================================
- */
 
-// I2Cdev and MPU6050 must be installed as libraries
-#include "Arduino.h"
-#include "I2Cdev.h"
-#include "MPU6050.h"
-#include "Wire.h"
-
-///////////////////////////////////   CONFIGURATION   /////////////////////////////
-//Change this 3 variables if you want to fine tune the skecth to your needs.
-int buffersize=1000;     //Amount of readings used to average, make it higher to get more precision but sketch will be slower  (default:1000)
-int acel_deadzone=8;     //Acelerometer error allowed, make it lower to get more precision, but sketch may not converge  (default:8)
-int giro_deadzone=1;     //Giro error allowed, make it lower to get more precision, but sketch may not converge  (default:1)
-
-// default I2C address is 0x68
-// specific I2C addresses may be passed as a parameter here
-// AD0 low = 0x68 (default for InvenSense evaluation board)
-// AD0 high = 0x69
-//MPU6050 accelgyro;
-MPU6050 accelgyro(0x68); // <-- use for AD0 high
-
-int16_t ax, ay, az,gx, gy, gz;
-
-void meansensors();
-void calibration();
-
-
-int mean_ax,mean_ay,mean_az,mean_gx,mean_gy,mean_gz,state=0;
-int ax_offset,ay_offset,az_offset,gx_offset,gy_offset,gz_offset;
-
-///////////////////////////////////   SETUP   ////////////////////////////////////
 void setup() {
-  // join I2C bus (I2Cdev library doesn't do this automatically)
-  Wire.begin();
-  // COMMENT NEXT LINE IF YOU ARE USING ARDUINO DUE
-  //TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz). Leonardo measured 250kHz.
-
-  // initialize serial communication
+  
+  /*
+   * #define SIGNAL_PATH_RESET  0x68
+     #define I2C_SLV0_ADDR      0x37
+     #define ACCEL_CONFIG       0x1C 
+     #define MOT_DETECT_CTRL    0x69
+     #define INT_ENABLE         0x38
+     #define WHO_AM_I_MPU6050   0x75                      // Should return 0x68
+     #define INT_STATUS 0x3A*/
   Serial.begin(115200);
+  writeByte(MPU6050_ADDRESS, 0x6B, 0x00);
+  writeByte(MPU6050_ADDRESS, SIGNAL_PATH_RESET, 0x07);  //Reset all internal signal paths in the MPU-6050 by writing 0x07 to register 0x68;
+  writeByte(MPU6050_ADDRESS, I2C_SLV0_ADDR, 0x00);      //write register 0x37 to select how to use the interrupt pin. For an active high, push-pull signal that stays until register (decimal) 58 is read, write 0x20.
+  writeByte(MPU6050_ADDRESS, ACCEL_CONFIG, 0x01);       //Write register 28 (==0x1C) to set the Digital High Pass Filter, bits 3:0. For example set it to 0x01 for 5Hz. (These 3 bits are grey in the data sheet, but they are used! Leaving them 0 means the filter always outputs 0.)
+  writeByte(MPU6050_ADDRESS, FF_THR, 60);               //Write the desired Motion threshold to register 0x1F (For example, write decimal 20).  
+  writeByte(MPU6050_ADDRESS, FF_DUR, 30);               //Set motion detect duration to 1  ms; LSB is 1 ms @ 1 kHz rate  
+  writeByte(MPU6050_ADDRESS, MOT_DETECT_CTRL, 0x14);    // metemos 1ms mas de calibracion y configuramos el FF
+  writeByte(MPU6050_ADDRESS, INT_ENABLE, 0x80);         //write register 0x38, bit 6 (0x40), to enable motion detection interrupt.     
+  writeByte(MPU6050_ADDRESS, 0x37, 160);                // now INT pin is active low
 
-  // initialize device
-  accelgyro.initialize();
+  pinMode(2, INPUT);                                    // sets the digital pin 7 as input
 
-  // wait for ready
-  while (Serial.available() && Serial.read()); // empty buffer
-  while (!Serial.available()){
-    Serial.println(F("Send any character to start sketch.\n"));
-    delay(1500);
-  }                
-  while (Serial.available() && Serial.read()); // empty buffer again
+  pinMode(LED_BUILTIN, OUTPUT);                         //   led is pin no. 13
+  digitalWrite(LED_BUILTIN, LOW);                       // turn onn LED
 
-  // start message
-  Serial.println("\nMPU6050 Calibration Sketch");
-  delay(2000);
-  Serial.println("\nYour MPU6050 should be placed in horizontal position, with package letters facing up. \nDon't touch it until you see a finish message.\n");
-  delay(3000);
-  // verify connection
-  Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
-  delay(1000);
-  // reset offsets
-  accelgyro.setXAccelOffset(0);
-  accelgyro.setYAccelOffset(0);
-  accelgyro.setZAccelOffset(0);
-  accelgyro.setXGyroOffset(0);
-  accelgyro.setYGyroOffset(0);
-  accelgyro.setZGyroOffset(0);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
 }
 
-///////////////////////////////////   LOOP   ////////////////////////////////////
+uint8_t count;
+uint16_t readdata;
 void loop() {
-  if (state==0){
-    Serial.println("\nReading sensors for first time...");
-    meansensors();
-    state++;
-    delay(1000);
+
+  Serial.println("Going to sleep");
+  gpio_pin_wakeup_enable(GPIO_ID_PIN(LIGHT_WAKE_PIN), GPIO_PIN_INTR_LOLEVEL);
+  wifi_set_opmode(NULL_MODE);
+  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+  wifi_fpm_open();
+  wifi_fpm_set_wakeup_cb(callback);
+  wifi_fpm_do_sleep(FPM_SLEEP_MAX_TIME);
+  delay(1000);
+  Serial.println("Woke up");
+
+
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+
+
+  if (flag) 
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  else
+  {
+    digitalWrite(LED_BUILTIN, LOW);
   }
 
-  if (state==1) {
-    Serial.println("\nCalculating offsets...");
-    calibration();
-    state++;
-    delay(1000);
+  sendMessage("Ayuda, me caí");
+  
+  readdata = readByte(MPU6050_ADDRESS, 0x3A);
+  if(readdata == 0b10000001 || count == 100)
+  {
+    Serial.print(readdata, BIN);
+    Serial.print(",");
+    readdata = readByte(MPU6050_ADDRESS, 0x37);
+    Serial.println(readdata, BIN);
+    count = 0;
   }
-
-  if (state==2) {
-    meansensors();
-    Serial.println("\nFINISHED!");
-    Serial.print("\nSensor readings with offsets:\t");
-    Serial.print(mean_ax); 
-    Serial.print("\t");
-    Serial.print(mean_ay); 
-    Serial.print("\t");
-    Serial.print(mean_az); 
-    Serial.print("\t");
-    Serial.print(mean_gx); 
-    Serial.print("\t");
-    Serial.print(mean_gy); 
-    Serial.print("\t");
-    Serial.println(mean_gz);
-    Serial.print("Your offsets:\t");
-    Serial.print(ax_offset); 
-    Serial.print("\t");
-    Serial.print(ay_offset); 
-    Serial.print("\t");
-    Serial.print(az_offset); 
-    Serial.print("\t");
-    Serial.print(gx_offset); 
-    Serial.print("\t");
-    Serial.print(gy_offset); 
-    Serial.print("\t");
-    Serial.println(gz_offset); 
-    Serial.println("\nData is printed as: acelX acelY acelZ giroX giroY giroZ");
-    Serial.println("Check that your sensor readings are close to 0 0 16384 0 0 0");
-    Serial.println("If calibration was succesful write down your offsets so you can set them in your projects using something similar to mpu.setXAccelOffset(youroffset)");
-    while (1);
-  }
+  count++;
 }
 
-///////////////////////////////////   FUNCTIONS   ////////////////////////////////////
-void meansensors(){
-  long i=0,buff_ax=0,buff_ay=0,buff_az=0,buff_gx=0,buff_gy=0,buff_gz=0;
 
-  while (i<(buffersize+101)){
-    // read raw accel/gyro measurements from device
-    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    
-    if (i>100 && i<=(buffersize+100)){ //First 100 measures are discarded
-      buff_ax=buff_ax+ax;
-      buff_ay=buff_ay+ay;
-      buff_az=buff_az+az;
-      buff_gx=buff_gx+gx;
-      buff_gy=buff_gy+gy;
-      buff_gz=buff_gz+gz;
-    }
-    if (i==(buffersize+100)){
-      mean_ax=buff_ax/buffersize;
-      mean_ay=buff_ay/buffersize;
-      mean_az=buff_az/buffersize;
-      mean_gx=buff_gx/buffersize;
-      mean_gy=buff_gy/buffersize;
-      mean_gz=buff_gz/buffersize;
-    }
-    i++;
-    delay(2); //Needed so we don't get repeated measures
+
+void sendMessage(String message)
+{
+  // Data to send with HTTP POST
+  String url = "http://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&apikey=" + apiKey + "&text=" + urlEncode(message);
+  WiFiClient client;    
+  HTTPClient http;
+  http.begin(client, url);
+
+  // Specify content-type header
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  
+  // Send HTTP POST request
+  int httpResponseCode = http.POST(url);
+  if (httpResponseCode == 200){
+    Serial.print("Message sent successfully");
   }
+  else{
+    Serial.println("Error sending the message");
+    Serial.print("HTTP response code: ");
+    Serial.println(httpResponseCode);
+  }
+
+  // Free resources
+  http.end();
 }
 
-void calibration(){
-  ax_offset=(16384-mean_ax)/8;
-  ay_offset=-mean_ay/8;
-  az_offset=-mean_az/8;
+/*    Example for using write byte
+      Configure the accelerometer for self-test
+      writeByte(MPU6050_ADDRESS, ACCEL_CONFIG, 0xF0); // Enable self test on all three axes and set accelerometer range to +/- 8 g */
+void writeByte(uint8_t address, uint8_t subAddress, uint8_t data) {
+  Wire.begin();
+  Wire.beginTransmission(address);  // Initialize the Tx buffer
+  Wire.write(subAddress);           // Put slave register address in Tx buffer
+  Wire.write(data);                 // Put data in Tx buffer
+  Wire.endTransmission();           // Send the Tx buffer
+}
 
-  gx_offset=-mean_gx/4;
-  gy_offset=-mean_gy/4;
-  gz_offset=-mean_gz/4;
-  while (1){
-    int ready=0;
-    accelgyro.setXAccelOffset(ax_offset);
-    accelgyro.setYAccelOffset(ay_offset);
-    accelgyro.setZAccelOffset(az_offset);
+//example showing using readbytev   ----    readByte(MPU6050_ADDRESS, GYRO_CONFIG);
+uint8_t readByte(uint8_t address, uint8_t subAddress) {
+  uint8_t data; // `data` will store the register data   
+  Wire.beginTransmission(address); // Initialize the Tx buffer
+  Wire.write(subAddress); // Put slave register address in Tx buffer
+  Wire.endTransmission(false); // Send the Tx buffer, but send a restart to keep connection alive
+  Wire.requestFrom(address, (uint8_t) 1); // Read one byte from slave register address 
+  data = Wire.read(); // Fill Rx buffer with result
+  return data; // Return data read from slave register
+}
 
-    accelgyro.setXGyroOffset(gx_offset);
-    accelgyro.setYGyroOffset(gy_offset);
-    accelgyro.setZGyroOffset(gz_offset);
 
-    meansensors();
-    Serial.println("...");
-
-    if (abs(16384-mean_ax)<=acel_deadzone) ready++;
-    else ax_offset=ax_offset+(16384-mean_ax)/acel_deadzone;
-
-    if (abs(mean_ay)<=acel_deadzone) ready++;
-    else ay_offset=ay_offset-mean_ay/acel_deadzone;
-
-    if (abs(mean_az)<=acel_deadzone) ready++;
-    else az_offset=az_offset-mean_az/acel_deadzone;
-
-    if (abs(mean_gx)<=giro_deadzone) ready++;
-    else gx_offset=gx_offset-mean_gx/(giro_deadzone+1);
-
-    if (abs(mean_gy)<=giro_deadzone) ready++;
-    else gy_offset=gy_offset-mean_gy/(giro_deadzone+1);
-
-    if (abs(mean_gz)<=giro_deadzone) ready++;
-    else gz_offset=gz_offset-mean_gz/(giro_deadzone+1);
-
-    if (ready==6) break;
-  }
+void callback() {
+  flag = !flag;
 }
