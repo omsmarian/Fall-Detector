@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <UrlEncode.h>
 
  //Analog port 4 (A4) = SDA (serial data)
 //Analog port 5 (A5) = SCL (serial clock)
@@ -25,13 +28,16 @@
 #define FPM_SLEEP_MAX_TIME  0xFFFFFFF
 
 int wakePin = 2; // pin used for waking up  
-int flag = 0;
+bool flag = 0;
 
-ICACHE_RAM_ATTR void miua()
-{
-  flag = !flag;
-}
+const char* ssid = "Casas";
+const char* password = "momslindo";
 
+String phoneNumber = "+5491169350147";
+String apiKey = "9384670";
+
+
+void sendMessage(String message);
 
 /*    Example for using write byte
       Configure the accelerometer for self-test
@@ -58,7 +64,7 @@ uint8_t readByte(uint8_t address, uint8_t subAddress) {
 }
 
 void callback() {
-  Serial1.println("Siesta");
+  flag = !flag;
 }
  
 
@@ -87,10 +93,11 @@ void setup() {
 
   pinMode(2, INPUT);                                    // sets the digital pin 7 as input
 
-  // pinMode(D5, INPUT_PULLUP);                            // wakePin is pin no. 2
-  // attachInterrupt(digitalPinToInterrupt(D5), miua, FALLING);
   pinMode(LED_BUILTIN, OUTPUT);                         //   led is pin no. 13
   digitalWrite(LED_BUILTIN, LOW);                       // turn onn LED
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
 
 }
 
@@ -107,6 +114,20 @@ void loop() {
   wifi_fpm_do_sleep(FPM_SLEEP_MAX_TIME);
   delay(1000);
   Serial.println("Woke up");
+
+
+
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+
+  sendMessage("Ayuda, me caí");
 
   if (flag) 
   {
@@ -127,7 +148,32 @@ void loop() {
     count = 0;
   }
   count++;
+}
 
 
-   //wifi_station_disconnect(); //not needed
+
+void sendMessage(String message)
+{
+  // Data to send with HTTP POST
+  String url = "http://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&apikey=" + apiKey + "&text=" + urlEncode(message);
+  WiFiClient client;    
+  HTTPClient http;
+  http.begin(client, url);
+
+  // Specify content-type header
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  
+  // Send HTTP POST request
+  int httpResponseCode = http.POST(url);
+  if (httpResponseCode == 200){
+    Serial.print("Message sent successfully");
+  }
+  else{
+    Serial.println("Error sending the message");
+    Serial.print("HTTP response code: ");
+    Serial.println(httpResponseCode);
+  }
+
+  // Free resources
+  http.end();
 }
