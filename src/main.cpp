@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include <keys.h>
 #include <Wire.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
@@ -31,11 +31,7 @@
 
 bool flag = 0;
 
-const char* ssid = "Oms";
-const char* password = "carranza1960";
 
-String phoneNumber = "+5491169350147";
-String apiKey = "9384670";
 
 
 void sendMessage(String message);
